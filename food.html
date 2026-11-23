@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Food Freshness Reminder Box</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    @keyframes screen-blink-red {
+      0%, 100% { background-color: #020617; box-shadow: inset 0 0 0 0 rgba(220,38,38,0); }
+      50% { background-color: #7f1d1d; box-shadow: inset 0 0 90px 25px rgba(239,68,68,0.75); }
+    }
+    .screen-alert-blink { animation: screen-blink-red 1s infinite ease-in-out; }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen font-sans">
+  <div class="max-w-6xl mx-auto px-4 py-8">
+    <header class="flex flex-wrap items-center justify-between gap-4 pb-6 border-b border-slate-800">
+      <div>
+        <h1 class="text-2xl sm:text-3xl font-bold text-white">🥗 Food Freshness Reminder Box</h1>
+        <p class="text-slate-400 text-sm mt-1">ESP32 + DHT22 + MQ135 Real-Time Spoilage Monitor</p>
+      </div>
+      <div class="flex items-center gap-3">
+        <span class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium bg-slate-900 border border-slate-700">
+          <span id="conn-dot" class="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span>
+          <span id="conn-text">Connecting...</span>
+        </span>
+        <span id="last-updated" class="text-xs text-slate-400">--:--:--</span>
+      </div>
+    </header>
+
+    <div id="error-box" class="hidden mt-6 p-4 rounded-xl bg-red-950 border border-red-600 text-red-200 text-sm"></div>
+
+    <section id="status-banner" class="mt-6 p-6 rounded-2xl bg-emerald-950/60 border border-emerald-700 transition-all">
+      <div class="flex flex-wrap items-center justify-between gap-4">
+        <div class="flex items-center gap-4">
+          <div id="status-icon" class="text-4xl">✅</div>
+          <div>
+            <span class="text-xs uppercase tracking-wider font-semibold text-slate-400">Storage Condition</span>
+            <h2 id="status-title" class="text-3xl font-extrabold text-emerald-400">FRESH</h2>
+            <p id="status-desc" class="text-sm text-slate-200 mt-1">Loading sensor data...</p>
+          </div>
+        </div>
+        <div class="text-xs text-slate-300 space-y-1 bg-slate-950/70 px-4 py-3 rounded-xl border border-slate-800">
+          <div>Temp Limit: <b class="text-white">30.0 °C</b></div>
+          <div>Gas Limit: <b class="text-white">800</b></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="grid grid-cols-1 sm:grid-cols-3 gap-5 mt-6">
+      <div id="card-temp" class="p-6 rounded-2xl bg-slate-900/90 border border-slate-800">
+        <div class="flex justify-between text-sm text-slate-300"><span>Temperature</span><span>🌡️</span></div>
+        <div class="mt-3 text-4xl font-bold"><span id="val-temp">--</span> <span class="text-lg text-slate-400">°C</span></div>
+      </div>
+      <div class="p-6 rounded-2xl bg-slate-900/90 border border-slate-800">
+        <div class="flex justify-between text-sm text-slate-300"><span>Humidity</span><span>💧</span></div>
+        <div class="mt-3 text-4xl font-bold"><span id="val-hum">--</span> <span class="text-lg text-slate-400">%</span></div>
+      </div>
+      <div id="card-gas" class="p-6 rounded-2xl bg-slate-900/90 border border-slate-800">
+        <div class="flex justify-between text-sm text-slate-300"><span>Gas / VOCs</span><span>🫧</span></div>
+        <div class="mt-3 text-4xl font-bold"><span id="val-gas">--</span> <span class="text-sm text-slate-400">raw</span></div>
+      </div>
+    </section>
+
+    <section class="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
+      <div class="lg:col-span-2 p-6 rounded-2xl bg-slate-900/90 border border-slate-800">
+        <h3 class="text-base font-semibold mb-4">Live Temperature &amp; Gas Trend</h3>
+        <div class="h-64"><canvas id="sensorChart"></canvas></div>
+      </div>
+      <div class="p-6 rounded-2xl bg-slate-900/90 border border-slate-800">
+        <h3 class="text-base font-semibold mb-4">Recent Logs</h3>
+        <table class="w-full text-left text-xs">
+          <thead><tr class="text-slate-400 border-b border-slate-800"><th class="pb-2">Time</th><th class="pb-2">Temp</th><th class="pb-2">Gas</th><th class="pb-2 text-right">State</th></tr></thead>
+          <tbody id="logs-body" class="divide-y divide-slate-800 text-slate-200"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const SUPABASE_URL = "https://ebwuorwwukzriegwstgp.supabase.co";
+    const SUPABASE_KEY = "sb_publishable_CjjrTa9pnbnwsnM0vzluxg_V1cm4reo";
+    const TEMP_LIMIT = 30.0;
+    const GAS_LIMIT = 800;
+
+    let sensorChart = null;
+    try {
+      sensorChart = new Chart(document.getElementById("sensorChart"), {
+        type: "line",
+        data: {
+          labels: [],
+          datasets: [
+            { label: "Temp (°C)", data: [], borderColor: "#38bdf8", yAxisID: "yT", tension: 0.3 },
+            { label: "Gas", data: [], borderColor: "#f59e0b", yAxisID: "yG", tension: 0.3 }
+          ]
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          scales: {
+            yT: { type: "linear", position: "left", ticks: { color: "#38bdf8" } },
+            yG: { type: "linear", position: "right", ticks: { color: "#f59e0b" }, grid: { drawOnChartArea: false } }
+          }
+        }
+      });
+    } catch (e) {}
+
+    function fmtTime(r) {
+      return r.created_at ? new Date(r.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : `#${r.id}`;
+    }
+
+    async function fetchSensorData() {
+      const errBox = document.getElementById("error-box");
+      try {
+        const res = await fetch(`${SUPABASE_URL}/rest/v1/sensor_data?select=*&order=id.desc&limit=20`, {
+          headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}` }
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+        const rows = await res.json();
+
+        errBox.classList.add("hidden");
+        document.getElementById("conn-dot").className = "w-2 h-2 rounded-full bg-emerald-400";
+        document.getElementById("conn-text").textContent = "Live Sync";
+        document.getElementById("last-updated").textContent = new Date().toLocaleTimeString();
+
+        if (!rows.length) return;
+        const latest = rows[0];
+        const t = Number(latest.temperature), h = Number(latest.humidity), g = Number(latest.gas);
+        const spoiled = latest.alert === true || t > TEMP_LIMIT || g > GAS_LIMIT;
+
+        document.getElementById("val-temp").textContent = t.toFixed(1);
+        document.getElementById("val-hum").textContent = Math.round(h);
+        document.getElementById("val-gas").textContent = g;
+
+        document.body.classList.toggle("screen-alert-blink", spoiled);
+        const banner = document.getElementById("status-banner");
+        const title = document.getElementById("status-title");
+        const icon = document.getElementById("status-icon");
+        const desc = document.getElementById("status-desc");
+
+        if (spoiled) {
+          banner.className = "mt-6 p-6 rounded-2xl bg-red-950/90 border-2 border-red-500";
+          icon.textContent = "🚨";
+          title.textContent = "SPOILED / ALERT";
+          title.className = "text-3xl font-extrabold text-red-400";
+          desc.textContent = `Alert! Temp: ${t.toFixed(1)}°C | Gas: ${g}`;
+        } else {
+          banner.className = "mt-6 p-6 rounded-2xl bg-emerald-950/60 border border-emerald-700";
+          icon.textContent = "✅";
+          title.textContent = "FRESH";
+          title.className = "text-3xl font-extrabold text-emerald-400";
+          desc.textContent = "Temperature and air quality are within safe limits.";
+        }
+
+        document.getElementById("logs-body").innerHTML = rows.slice(0, 7).map(r => {
+          const bad = r.alert || Number(r.temperature) > TEMP_LIMIT || Number(r.gas) > GAS_LIMIT;
+          return `<tr><td class="py-2">${fmtTime(r)}</td><td>${Number(r.temperature).toFixed(1)}°C</td><td>${r.gas}</td><td class="text-right font-bold ${bad ? "text-red-400" : "text-emerald-400"}">${bad ? "ALERT" : "FRESH"}</td></tr>`;
+        }).join("");
+
+        if (sensorChart) {
+          const ord = [...rows].reverse();
+          sensorChart.data.labels = ord.map(fmtTime);
+          sensorChart.data.datasets[0].data = ord.map(r => Number(r.temperature));
+          sensorChart.data.datasets[1].data = ord.map(r => Number(r.gas));
+          sensorChart.update("none");
+        }
+      } catch (err) {
+        document.getElementById("conn-dot").className = "w-2 h-2 rounded-full bg-red-500";
+        document.getElementById("conn-text").textContent = "Sync Error";
+        errBox.textContent = `Error: ${err.message}`;
+        errBox.classList.remove("hidden");
+      }
+    }
+
+    fetchSensorData();
+    setInterval(fetchSensorData, 4000);
+  </script>
+</body>
+</html>
